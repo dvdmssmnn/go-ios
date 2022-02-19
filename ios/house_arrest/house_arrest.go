@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	log "github.com/sirupsen/logrus"
 	"strings"
 
 	"github.com/danielpaulus/go-ios/ios"
@@ -113,11 +114,78 @@ func (conn *Connection) ListFiles(filePath string) ([]string, error) {
 	return strings.Split(fileList, string([]byte{0})), nil
 }
 
+func (conn *Connection) ReadFile(path string) ([]byte, error) {
+	headerPayload := []byte(path)
+	headerLength := uint64(len(headerPayload))
+
+	this_length := afc_header_size + headerLength
+	header := AfcPacketHeader{Magic: afc_magic, Packet_num: conn.packageNumber, Operation: 0xa, This_length: this_length, Entire_length: this_length}
+	conn.packageNumber++
+	packet := AfcPacket{header: header, headerPayload: headerPayload, payload: make([]byte, 0)}
+
+	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	if err != nil {
+		return nil, err
+	}
+	return response.payload, nil
+}
+
+func (conn *Connection) RemovePath(path string) error {
+	headerPayload := []byte(path)
+	headerLength := uint64(len(headerPayload))
+
+	this_length := afc_header_size + headerLength
+	header := AfcPacketHeader{Magic: afc_magic, Packet_num: conn.packageNumber, Operation: 0x8, This_length: this_length, Entire_length: this_length}
+	conn.packageNumber++
+	packet := AfcPacket{header: header, headerPayload: headerPayload, payload: make([]byte, 0)}
+
+	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	log.Infof("%v", response)
+	return err
+}
+
+func (conn *Connection) OpenFile(path string) ([]byte, error) {
+	headerPayload := []byte{}
+	headerLength := uint64(len(headerPayload))
+
+	this_length := afc_header_size + headerLength
+	header := AfcPacketHeader{Magic: afc_magic, Packet_num: conn.packageNumber, Operation: 0xd, This_length: this_length, Entire_length: this_length}
+	conn.packageNumber++
+	packet := AfcPacket{header: header, headerPayload: headerPayload, payload: []byte(path)}
+
+	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	if err != nil {
+		return nil, err
+	}
+	return response.payload, nil
+}
+
 func (conn *Connection) openFileForWriting(filePath string) (byte, error) {
 	pathBytes := []byte(filePath)
 	headerLength := 8 + uint64(len(pathBytes))
 	headerPayload := make([]byte, headerLength)
 	binary.LittleEndian.PutUint64(headerPayload, afc_fopen_wronly)
+	copy(headerPayload[8:], pathBytes)
+	this_length := afc_header_size + headerLength
+	header := AfcPacketHeader{Magic: afc_magic, Packet_num: conn.packageNumber, Operation: afc_operation_file_open, This_length: this_length, Entire_length: this_length}
+	conn.packageNumber++
+	packet := AfcPacket{header: header, headerPayload: headerPayload, payload: make([]byte, 0)}
+
+	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	if err != nil {
+		return 0, err
+	}
+	if response.header.Operation != afc_operation_file_open_result {
+		return 0, fmt.Errorf("Unexpected afc response, expected %x received %x", afc_operation_status, response.header.Operation)
+	}
+	return response.headerPayload[0], nil
+}
+
+func (conn *Connection) openFileForReading(filePath string) (byte, error) {
+	pathBytes := []byte(filePath)
+	headerLength := 8 + uint64(len(pathBytes))
+	headerPayload := make([]byte, headerLength)
+	binary.LittleEndian.PutUint64(headerPayload, afc_fopen_ronly)
 	copy(headerPayload[8:], pathBytes)
 	this_length := afc_header_size + headerLength
 	header := AfcPacketHeader{Magic: afc_magic, Packet_num: conn.packageNumber, Operation: afc_operation_file_open, This_length: this_length, Entire_length: this_length}
@@ -156,6 +224,40 @@ func (conn *Connection) sendFileContents(fileContents []byte, handle byte) error
 		return fmt.Errorf("Unexpected afc response, expected %x received %x", afc_operation_status, response.header.Operation)
 	}
 	return nil
+}
+
+func (conn *Connection) readFileContents(handle byte) ([]byte, error) {
+	type headerPayload struct {
+		handle uint64
+		length uint64
+	}
+	hp := headerPayload{
+		handle: uint64(handle),
+		length: 8 * 1024,
+	}
+	buf := bytes.NewBuffer(nil)
+	binary.Write(buf, binary.LittleEndian, hp)
+	header := AfcPacketHeader{Magic: afc_magic, Packet_num: conn.packageNumber, Operation: afc_operation_file_read, This_length: 16 + afc_header_size, Entire_length: 16 + afc_header_size}
+	conn.packageNumber++
+	packet := AfcPacket{header: header, headerPayload: buf.Bytes(), payload: []byte{}}
+
+	buff := bytes.NewBuffer(nil)
+
+	for {
+		response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+		if err != nil {
+			return nil, err
+		}
+		if response.header.Operation != afc_operation_data {
+			return nil, fmt.Errorf("Unexpected afc response, expected %x received %x", afc_operation_status, response.header.Operation)
+		}
+		if len(response.payload) == 0 {
+			break
+		}
+		buff.Write(response.payload)
+	}
+
+	return buff.Bytes(), nil
 }
 
 func (conn *Connection) closeHandle(handle byte) error {
