@@ -1,56 +1,72 @@
 package house_arrest
 
-import "github.com/danielpaulus/go-ios/ios"
+import (
+	"github.com/danielpaulus/go-ios/ios"
+	"path"
+	"sort"
+)
 
 type CrashReports struct {
-	Conn Connection
+	afc  *AfcClient
+	Conn *Connection
 }
 
 func NewCrashReports(c ios.DeviceConnectionInterface) *CrashReports {
-	return &CrashReports{Conn: Connection{
+	conn := &Connection{
 		deviceConn: c,
-	}}
+	}
+	return &CrashReports{
+		afc:  &AfcClient{deviceConn: c},
+		Conn: conn,
+	}
 }
 
 func (c *CrashReports) ListCrashReports() ([]string, error) {
-	response, err := c.Conn.ListFiles("")
+	reports, err := c.recursiveListReports(".")
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]string, 0)
-	for _, f := range response {
+	sort.Strings(reports)
+	return reports, nil
+}
+
+func (c *CrashReports) recursiveListReports(dir string) ([]string, error) {
+	files, err := c.afc.ListFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0)
+	for _, f := range files {
 		if f == "." || f == ".." {
 			continue
 		}
-		filtered = append(filtered, f)
+		info, err := c.afc.ReadFileInfo(path.Join(dir, f))
+		if err != nil {
+			return nil, err
+		}
+		switch info.IFmt {
+		case IFDIR:
+			contents, err := c.recursiveListReports(path.Join(dir, f))
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, contents...)
+		case IFREG:
+			result = append(result, path.Join(dir, f))
+		}
+		if info.IFmt == IFDIR {
+		}
 	}
-	return filtered, nil
-	//if err != nil {
-	//	return nil, err
-	//}
-	//log.Info(files)
-	//for _, f := range files {
-	//	if f == "." || f == ".." {
-	//		continue
-	//	}
-	//	data, err := h.openFileForReading(f)
-	//	if err != nil {
-	//		continue
-	//	}
-	//	log.Infof("file %s: %s", f, string(data))
-	//	h.readFileContents(data)
-	//}
-	//return nil
+	return result, nil
 }
 
 func (c *CrashReports) FetchCrashReport(name string) ([]byte, error) {
-	c.Conn.ReadFile(name)
-	handle, err := c.Conn.openFileForReading(name)
+	handle, err := c.afc.OpenFileReadOnly(name)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Conn.closeHandle(handle)
-	return c.Conn.readFileContents(handle)
+	defer c.afc.CloseFile(handle)
+	return c.afc.ReadFully(handle)
 }
 
 func (c *CrashReports) DeleteReport(name string) error {

@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/danielpaulus/go-ios/ios/house_arrest"
 	"github.com/danielpaulus/go-ios/ios/testmanagerd"
+	"io/fs"
 	"io/ioutil"
+	"path"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -79,6 +83,7 @@ Usage:
   ios ax [options]
   ios debug [options] [--stop-at-entry] <app_path>
   ios reboot [options]
+  ios crashreports [--report=<report_name>] [--list] [--rm] <dst_dir>
   ios -h | --help
   ios --version | version [options]
 
@@ -134,6 +139,7 @@ The commands work as following:
    ios ax [options]                                                   Access accessibility inspector features. 
    ios debug [--stop-at-entry] <app_path>                             Start debug with lldb
    ios reboot [options]                                               Reboot the given device
+   ios crashreports                                                   Downloads crash reports from the given device
    ios -h | --help                                                    Prints this screen.
    ios --version | version [options]                                  Prints the version
 
@@ -495,6 +501,76 @@ The commands work as following:
 			log.Info("ok")
 		}
 		return
+	}
+
+	b, _ = arguments.Bool("crashreports")
+	if b {
+		deleteAfterFetch, _ := arguments.Bool("--rm")
+		listOnly, _ := arguments.Bool("--list")
+		dstDir, err := arguments.String("<dst_dir>")
+		if err != nil {
+			log.Fatal(err)
+		}
+		f, err := os.Stat(dstDir)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.MkdirAll(dstDir, fs.ModePerm); err != nil {
+				log.Fatal(err)
+			}
+		} else if !f.IsDir() {
+			log.Fatal("Not a directory")
+		}
+
+		reportName, _ := arguments.String("--report")
+
+		svc, err := ios.ConnectToService(device, "com.apple.crashreportmover")
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		b := make([]byte, 4)
+		svc.Reader().Read(b)
+		if string(b) == "ping" {
+			log.Info("got ping response")
+		}
+		svc.Close()
+		//"com.apple.crashreportcopymobile"
+
+		copy, err := ios.ConnectToService(device, "com.apple.crashreportcopymobile")
+		if err != nil {
+			log.Error(err)
+			return
+		}
+		cr := house_arrest.NewCrashReports(copy)
+		reports, err := cr.ListCrashReports()
+		if err != nil {
+			log.Fatal(err)
+		}
+		if listOnly {
+			log.Infof("Reports: %v", reports)
+			return
+		}
+		if reportName != "" {
+			reports = []string{reportName}
+		}
+		for _, r := range reports {
+			log.WithField("file", r).Info("Fetch report")
+			crashreportData, err := cr.FetchCrashReport(r)
+			if err != nil {
+				log.WithError(err).Warn("Failed to fetch report")
+			}
+			dst := path.Join(dstDir, r)
+			_, err = os.Stat(path.Dir(dst))
+			if errors.Is(err, os.ErrNotExist) {
+				os.MkdirAll(path.Dir(dst), fs.ModePerm)
+			}
+			err = ioutil.WriteFile(dst, crashreportData, 0666)
+			if err != nil {
+				log.WithField("report", r).WithError(err).Error("failed to write")
+			}
+			if deleteAfterFetch {
+				cr.DeleteReport(r)
+			}
+		}
 	}
 
 }
