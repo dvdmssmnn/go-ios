@@ -23,6 +23,7 @@ type DeviceConnectionInterface interface {
 	EnableSessionSslServerModeHandshakeOnly(pairRecord PairRecord) error
 	DisableSessionSSL()
 	Conn() net.Conn
+	io.ReadWriteCloser
 }
 
 // DeviceConnection wraps the net.Conn to the ios Device and has support for
@@ -30,6 +31,14 @@ type DeviceConnectionInterface interface {
 type DeviceConnection struct {
 	c               net.Conn
 	unencryptedConn net.Conn
+}
+
+func (conn *DeviceConnection) Read(p []byte) (n int, err error) {
+	return conn.c.Read(p)
+}
+
+func (conn *DeviceConnection) Write(p []byte) (n int, err error) {
+	return conn.c.Write(p)
 }
 
 // NewDeviceConnection creates a new DeviceConnection pointing to the given socket waiting for a call to Connect()
