@@ -18,7 +18,7 @@ import (
 const serviceName = "com.apple.afc"
 
 type Connection struct {
-	deviceConn    ios.DeviceConnectionInterface
+	conn          io.ReadWriteCloser
 	packageNumber uint64
 }
 
@@ -45,20 +45,20 @@ func New(device ios.DeviceEntry) (*Connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Connection{deviceConn: deviceConn}, nil
+	return &Connection{conn: deviceConn}, nil
 }
 
-// NewFromConn allows to use AFC on a DeviceConnectionInterface, see crashreport for an example
-func NewFromConn(deviceConn ios.DeviceConnectionInterface) *Connection {
-	return &Connection{deviceConn: deviceConn}
+// NewFromConn allows to use AFC on an existing connection, see crashreport for an example
+func NewFromConn(conn io.ReadWriteCloser) *Connection {
+	return &Connection{conn: conn}
 }
 
 func (conn *Connection) sendAfcPacketAndAwaitResponse(packet AfcPacket) (AfcPacket, error) {
-	err := Encode(packet, conn.deviceConn.Writer())
+	err := Encode(packet, conn.conn)
 	if err != nil {
 		return AfcPacket{}, err
 	}
-	return Decode(conn.deviceConn.Reader())
+	return Decode(conn.conn)
 }
 
 func (conn *Connection) checkOperationStatus(packet AfcPacket) error {
@@ -509,5 +509,5 @@ func (conn *Connection) WriteToFile(reader io.Reader, dstPath string) error {
 }
 
 func (conn *Connection) Close() {
-	conn.deviceConn.Close()
+	conn.conn.Close()
 }
