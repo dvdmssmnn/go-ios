@@ -53,16 +53,27 @@ func NewFromConn(conn io.ReadWriteCloser) *Connection {
 	return &Connection{conn: conn}
 }
 
-func (conn *Connection) sendAfcPacketAndAwaitResponse(packet AfcPacket) (AfcPacket, error) {
-	err := Encode(packet, conn.conn)
+func (conn *Connection) writeRequestAndCheckResponse(p Packet) error {
+	res, err := conn.writeRequestAndReadResponse(p)
 	if err != nil {
-		return AfcPacket{}, err
+		return err
 	}
-	return Decode(conn.conn)
+	if err = conn.checkResponseStatus(res); err != nil {
+		return fmt.Errorf("unexpected afc status: %v", err)
+	}
+	return nil
 }
 
-func (conn *Connection) checkOperationStatus(packet AfcPacket) error {
-	if packet.Header.Operation == Afc_operation_status {
+func (conn *Connection) writeRequestAndReadResponse(p Packet) (Packet, error) {
+	err := conn.write(p)
+	if err != nil {
+		return Packet{}, err
+	}
+	return conn.read()
+}
+
+func (conn *Connection) checkResponseStatus(packet Packet) error {
+	if packet.Op == Afc_operation_status {
 		errorCode := binary.LittleEndian.Uint64(packet.HeaderPayload)
 		if errorCode != Afc_Err_Success {
 			return getError(errorCode)
@@ -72,38 +83,25 @@ func (conn *Connection) checkOperationStatus(packet AfcPacket) error {
 }
 
 func (conn *Connection) Remove(path string) error {
-	headerPayload := []byte(path)
-	headerLength := uint64(len(headerPayload))
-	thisLength := Afc_header_size + headerLength
-
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_remove_path, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
-	if err != nil {
-		return err
+	p := Packet{
+		Op:            Afc_operation_remove_path,
+		HeaderPayload: []byte(path),
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
-		return fmt.Errorf("remove: unexpected afc status: %v", err)
+	err := conn.writeRequestAndCheckResponse(p)
+	if err != nil {
+		return fmt.Errorf("remove: %w", err)
 	}
 	return nil
 }
 
 func (conn *Connection) RemovePathAndContents(path string) error {
-	headerPayload := []byte(path)
-	headerPayload = append(headerPayload, 0)
-	headerLength := uint64(len(headerPayload))
-	thisLength := Afc_header_size + headerLength
-
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_remove_path_and_contents, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
-	if err != nil {
-		return err
+	p := Packet{
+		Op:            Afc_operation_remove_path_and_contents,
+		HeaderPayload: []byte(fmt.Sprintf("%s\x00", path)),
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
-		return fmt.Errorf("remove: unexpected afc status: %v", err)
+	err := conn.writeRequestAndCheckResponse(p)
+	if err != nil {
+		return fmt.Errorf("remove: %w", err)
 	}
 	return nil
 }
@@ -130,37 +128,27 @@ func (conn *Connection) RemoveAll(srcPath string) error {
 }
 
 func (conn *Connection) MkDir(path string) error {
-	headerPayload := []byte(path)
-	headerPayload = append(headerPayload, 0)
-	headerLength := uint64(len(headerPayload))
-	thisLength := Afc_header_size + headerLength
-
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_make_dir, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
-	if err != nil {
-		return err
+	p := Packet{
+		Op:            Afc_operation_make_dir,
+		HeaderPayload: []byte(fmt.Sprintf("%s\000", path)),
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
-		return fmt.Errorf("mkdir: unexpected afc status: %v", err)
+	err := conn.writeRequestAndCheckResponse(p)
+	if err != nil {
+		return fmt.Errorf("mkdir: %w", err)
 	}
 	return nil
 }
 
 func (conn *Connection) Stat(path string) (*statInfo, error) {
-	headerPayload := []byte(path)
-	headerLength := uint64(len(headerPayload))
-	thisLength := Afc_header_size + headerLength
-
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_file_info, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	p := Packet{
+		Op:            Afc_operation_file_info,
+		HeaderPayload: []byte(path),
+	}
+	response, err := conn.writeRequestAndReadResponse(p)
 	if err != nil {
 		return nil, err
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
+	if err = conn.checkResponseStatus(response); err != nil {
 		return nil, fmt.Errorf("stat: unexpected afc status: %v", err)
 	}
 	ret := bytes.Split(response.Payload, []byte{0})
@@ -187,18 +175,15 @@ func (conn *Connection) Stat(path string) (*statInfo, error) {
 }
 
 func (conn *Connection) listDir(path string) ([]string, error) {
-	headerPayload := []byte(path)
-	headerLength := uint64(len(headerPayload))
-	thisLength := Afc_header_size + headerLength
-
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_read_dir, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	p := Packet{
+		Op:            Afc_operation_read_dir,
+		HeaderPayload: []byte(path),
+	}
+	response, err := conn.writeRequestAndReadResponse(p)
 	if err != nil {
 		return nil, err
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
+	if err = conn.checkResponseStatus(response); err != nil {
 		return nil, fmt.Errorf("list dir: unexpected afc status: %v", err)
 	}
 	ret := bytes.Split(response.Payload, []byte{0})
@@ -212,15 +197,12 @@ func (conn *Connection) listDir(path string) ([]string, error) {
 }
 
 func (conn *Connection) GetSpaceInfo() (*AFCDeviceInfo, error) {
-	thisLength := Afc_header_size
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_device_info, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: nil, Payload: nil}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	p := Packet{Op: Afc_operation_device_info}
+	response, err := conn.writeRequestAndReadResponse(p)
 	if err != nil {
 		return nil, err
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
+	if err = conn.checkResponseStatus(response); err != nil {
 		return nil, fmt.Errorf("mkdir: unexpected afc status: %v", err)
 	}
 
@@ -260,15 +242,12 @@ func (conn *Connection) GetSpaceInfo() (*AFCDeviceInfo, error) {
 // ListFiles returns all files in the given directory, matching the pattern.
 // Example: ListFiles(".", "*") returns all files and dirs in the current path the afc connection is in
 func (conn *Connection) ListFiles(cwd string, matchPattern string) ([]string, error) {
-	headerPayload := []byte(cwd)
-	headerLength := uint64(len(headerPayload))
+	p := Packet{
+		Op:            Afc_operation_read_dir,
+		HeaderPayload: []byte(cwd),
+	}
 
-	thisLength := Afc_header_size + headerLength
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_read_dir, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	response, err := conn.writeRequestAndReadResponse(p)
 	if err != nil {
 		return nil, err
 	}
@@ -334,16 +313,16 @@ func (conn *Connection) OpenFile(path string, mode uint64) (uint64, error) {
 	headerPayload := make([]byte, headerLength)
 	binary.LittleEndian.PutUint64(headerPayload, mode)
 	copy(headerPayload[8:], pathBytes)
-	thisLength := Afc_header_size + headerLength
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_file_open, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
+	p := Packet{
+		Op:            Afc_operation_file_open,
+		HeaderPayload: headerPayload,
+	}
 
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+	response, err := conn.writeRequestAndReadResponse(p)
 	if err != nil {
 		return 0, err
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
+	if err = conn.checkResponseStatus(response); err != nil {
 		return 0, fmt.Errorf("open file: unexpected afc status: %v", err)
 	}
 	fd := binary.LittleEndian.Uint64(response.HeaderPayload)
@@ -357,16 +336,12 @@ func (conn *Connection) OpenFile(path string, mode uint64) (uint64, error) {
 func (conn *Connection) CloseFile(fd uint64) error {
 	headerPayload := make([]byte, 8)
 	binary.LittleEndian.PutUint64(headerPayload, fd)
-	thisLength := 8 + Afc_header_size
-	header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_file_close, This_length: thisLength, Entire_length: thisLength}
-	conn.packageNumber++
-	packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-	response, err := conn.sendAfcPacketAndAwaitResponse(packet)
-	if err != nil {
-		return err
+	p := Packet{
+		Op:            Afc_operation_file_close,
+		HeaderPayload: headerPayload,
 	}
-	if err = conn.checkOperationStatus(response); err != nil {
-		return fmt.Errorf("close file: unexpected afc status: %v", err)
+	if err := conn.writeRequestAndCheckResponse(p); err != nil {
+		return fmt.Errorf("close file: %w", err)
 	}
 	return nil
 }
@@ -396,16 +371,17 @@ func (conn *Connection) PullSingleFile(srcPath, dstPath string) error {
 	for leftSize > 0 {
 		headerPayload := make([]byte, 16)
 		binary.LittleEndian.PutUint64(headerPayload, fd)
-		thisLength := Afc_header_size + 16
 		binary.LittleEndian.PutUint64(headerPayload[8:], uint64(maxReadSize))
-		header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_file_read, This_length: thisLength, Entire_length: thisLength}
-		conn.packageNumber++
-		packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: make([]byte, 0)}
-		response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+		p := Packet{
+			Op:            Afc_operation_file_read,
+			HeaderPayload: headerPayload,
+			Payload:       nil,
+		}
+		response, err := conn.writeRequestAndReadResponse(p)
 		if err != nil {
 			return err
 		}
-		if err = conn.checkOperationStatus(response); err != nil {
+		if err = conn.checkResponseStatus(response); err != nil {
 			return fmt.Errorf("read file: unexpected afc status: %v", err)
 		}
 		leftSize = leftSize - int64(len(response.Payload))
@@ -492,15 +468,16 @@ func (conn *Connection) WriteToFile(reader io.Reader, dstPath string) error {
 		bytesRead := chunk[:n]
 		headerPayload := make([]byte, 8)
 		binary.LittleEndian.PutUint64(headerPayload, fd)
-		thisLength := Afc_header_size + 8
-		header := AfcPacketHeader{Magic: Afc_magic, Packet_num: conn.packageNumber, Operation: Afc_operation_file_write, This_length: thisLength, Entire_length: thisLength + uint64(n)}
-		conn.packageNumber++
-		packet := AfcPacket{Header: header, HeaderPayload: headerPayload, Payload: bytesRead}
-		response, err := conn.sendAfcPacketAndAwaitResponse(packet)
+		p := Packet{
+			Op:            Afc_operation_file_write,
+			HeaderPayload: headerPayload,
+			Payload:       bytesRead,
+		}
+		response, err := conn.writeRequestAndReadResponse(p)
 		if err != nil {
 			return err
 		}
-		if err = conn.checkOperationStatus(response); err != nil {
+		if err = conn.checkResponseStatus(response); err != nil {
 			return fmt.Errorf("write file: unexpected afc status: %v", err)
 		}
 
@@ -510,4 +487,40 @@ func (conn *Connection) WriteToFile(reader io.Reader, dstPath string) error {
 
 func (conn *Connection) Close() {
 	conn.conn.Close()
+}
+
+func (conn *Connection) write(p Packet) error {
+	hl := Afc_header_size + uint64(len(p.HeaderPayload))
+	tl := hl + uint64(len(p.Payload))
+	packet := AfcPacket{
+		Header: AfcPacketHeader{
+			Magic:         Afc_magic,
+			Entire_length: tl,
+			This_length:   hl,
+			Packet_num:    conn.packageNumber,
+			Operation:     p.Op,
+		},
+		HeaderPayload: p.HeaderPayload,
+		Payload:       p.Payload,
+	}
+	conn.packageNumber++
+	return Encode(packet, conn.conn)
+}
+
+func (conn *Connection) read() (Packet, error) {
+	p, err := Decode(conn.conn)
+	if err != nil {
+		return Packet{}, err
+	}
+	return Packet{
+		Op:            p.Header.Operation,
+		HeaderPayload: p.HeaderPayload,
+		Payload:       p.Payload,
+	}, nil
+}
+
+type Packet struct {
+	Op            uint64
+	HeaderPayload []byte
+	Payload       []byte
 }
