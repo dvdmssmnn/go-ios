@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,6 +32,8 @@ type statInfo struct {
 	stIfmt       string
 	stLinktarget string
 }
+
+const maxWriteChunkSize = uint64(64 * 1024)
 
 func (s *statInfo) IsDir() bool {
 	return s.stIfmt == "S_IFDIR"
@@ -422,24 +425,48 @@ func (conn *Connection) Pull(srcPath, dstPath string) error {
 }
 
 func (conn *Connection) Push(srcPath, dstPath string) error {
-	ret, _ := ios.PathExists(srcPath)
-	if !ret {
-		return fmt.Errorf("%s: no such file.", srcPath)
-	}
-
-	f, err := os.Open(srcPath)
+	log.Printf("push %s", dstPath)
+	stat, err := os.Stat(srcPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	if fileInfo, _ := conn.Stat(dstPath); fileInfo != nil {
-		if fileInfo.IsDir() {
-			dstPath = path.Join(dstPath, filepath.Base(srcPath))
+	if stat.IsDir() {
+		return conn.pushDir(srcPath, dstPath)
+	} else {
+		f, err := os.Open(srcPath)
+		if err != nil {
+			return err
 		}
-	}
+		defer f.Close()
 
-	return conn.WriteToFile(f, dstPath)
+		return conn.WriteToFile(f, dstPath)
+	}
+}
+
+func (conn *Connection) pushDir(srcPath string, dstPath string) error {
+	_, err := conn.Stat(dstPath)
+	if err == nil {
+		return fmt.Errorf("path already exists")
+	}
+	err = conn.MkDir(dstPath)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(srcPath, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if srcPath == p {
+			return nil
+		}
+		relative := p[len(srcPath):]
+		if d.IsDir() {
+			return conn.MkDir(path.Join(dstPath, relative))
+		} else {
+			return conn.Push(p, path.Join(dstPath, relative))
+		}
+		return nil
+	})
 }
 
 func (conn *Connection) WriteToFile(reader io.Reader, dstPath string) error {
@@ -455,8 +482,7 @@ func (conn *Connection) WriteToFile(reader io.Reader, dstPath string) error {
 	}
 	defer conn.CloseFile(fd)
 
-	maxWriteSize := 64 * 1024
-	chunk := make([]byte, maxWriteSize)
+	chunk := make([]byte, maxWriteChunkSize)
 	for {
 		n, err := reader.Read(chunk)
 		if err != nil && err != io.EOF {
